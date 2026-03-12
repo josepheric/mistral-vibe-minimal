@@ -34,8 +34,11 @@ class AgentType(StrEnum):
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
+    PLAN = "plan"
+    ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
+    CHAT = "chat"
 
 
 @dataclass(frozen=True)
@@ -70,9 +73,38 @@ class AgentProfile:
 DEFAULT = AgentProfile(
     BuiltinAgentName.DEFAULT,
     "Default",
-    "Auto-approves all tool executions",
-    AgentSafety.YOLO,
-    overrides={"auto_approve": True},
+    "Requires approval for tool executions",
+    AgentSafety.NEUTRAL,
+)
+PLAN = AgentProfile(
+    name=BuiltinAgentName.PLAN,
+    display_name="Plan",
+    description="Read-only planning mode",
+    safety=AgentSafety.SAFE,
+    overrides={
+        "tools": {
+            "write_file": {
+                "permission": "never",
+                "allowlist": ["*.md"],
+            },
+            "search_replace": {
+                "permission": "never",
+                "allowlist": ["*.md"],
+            },
+        },
+    },
+)
+ACCEPT_EDITS = AgentProfile(
+    name=BuiltinAgentName.ACCEPT_EDITS,
+    display_name="Accept Edits",
+    description="Auto-approves file edits",
+    safety=AgentSafety.DESTRUCTIVE,
+    overrides={
+        "tools": {
+            "write_file": {"permission": "always"},
+            "search_replace": {"permission": "always"},
+        },
+    },
 )
 AUTO_APPROVE = AgentProfile(
     BuiltinAgentName.AUTO_APPROVE,
@@ -93,6 +125,8 @@ EXPLORE = AgentProfile(
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
+    BuiltinAgentName.PLAN: PLAN,
+    BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
 }
