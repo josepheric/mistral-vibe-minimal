@@ -13,7 +13,6 @@ from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.logger import logger
 from vibe.core.paths import DEFAULT_TOOL_DIR
 from vibe.core.tools.base import BaseTool, BaseToolConfig
-from vibe.core.tools.mcp import MCPRegistry
 from vibe.core.utils import name_matches
 
 if TYPE_CHECKING:
@@ -68,17 +67,14 @@ class ToolManager:
     def __init__(
         self,
         config_getter: Callable[[], VibeConfig],
-        mcp_registry: MCPRegistry | None = None,
     ) -> None:
         self._config_getter = config_getter
-        self._mcp_registry = mcp_registry or MCPRegistry()
         self._instances: dict[str, BaseTool] = {}
         self._search_paths: list[Path] = self._compute_search_paths(self._config)
 
         self._available: dict[str, type[BaseTool]] = {
             cls.get_name(): cls for cls in self._iter_tool_classes(self._search_paths)
         }
-        self._integrate_mcp()
 
     @property
     def _config(self) -> VibeConfig:
@@ -193,21 +189,6 @@ class ToolManager:
                 if not name_matches(name, self._config.disabled_tools)
             }
         return runtime_available
-
-    def _integrate_mcp(self) -> None:
-        if not self._config.mcp_servers:
-            return
-
-        try:
-            mcp_tools = self._mcp_registry.get_tools(self._config.mcp_servers)
-        except Exception as exc:
-            logger.warning("MCP integration failed: %s", exc)
-            return
-
-        self._available.update(mcp_tools)
-        logger.info(
-            "MCP integration registered %d tools (via registry)", len(mcp_tools)
-        )
 
     def get_tool_config(self, tool_name: str) -> BaseToolConfig:
         tool_class = self._available.get(tool_name)

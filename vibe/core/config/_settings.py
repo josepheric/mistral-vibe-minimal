@@ -4,10 +4,8 @@ from collections.abc import MutableMapping
 from enum import StrEnum, auto
 import os
 from pathlib import Path
-import re
-import shlex
 import tomllib
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from dotenv import dotenv_values
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -131,104 +129,6 @@ class ProviderConfig(BaseModel):
     region: str = ""
 
 
-class _MCPBase(BaseModel):
-    name: str = Field(description="Short alias used to prefix tool names")
-    prompt: str | None = Field(
-        default=None, description="Optional usage hint appended to tool descriptions"
-    )
-    startup_timeout_sec: float = Field(
-        default=10.0,
-        gt=0,
-        description="Timeout in seconds for the server to start and initialize.",
-    )
-    tool_timeout_sec: float = Field(
-        default=60.0, gt=0, description="Timeout in seconds for tool execution."
-    )
-    sampling_enabled: bool = Field(
-        default=True,
-        description="Allow this MCP server to request LLM completions via sampling/createMessage.",
-    )
-
-    @field_validator("name", mode="after")
-    @classmethod
-    def normalize_name(cls, v: str) -> str:
-        normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", v)
-        normalized = normalized.strip("_-")
-        return normalized[:256]
-
-
-class _MCPHttpFields(BaseModel):
-    url: str = Field(description="Base URL of the MCP HTTP server")
-    headers: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Additional HTTP headers when using 'http' transport (e.g., Authorization or X-API-Key)."
-        ),
-    )
-    api_key_env: str = Field(
-        default="",
-        description=(
-            "Environment variable name containing an API token to send for HTTP transport."
-        ),
-    )
-    api_key_header: str = Field(
-        default="Authorization",
-        description=(
-            "HTTP header name to carry the token when 'api_key_env' is set (e.g., 'Authorization' or 'X-API-Key')."
-        ),
-    )
-    api_key_format: str = Field(
-        default="Bearer {token}",
-        description=(
-            "Format string for the header value when 'api_key_env' is set. Use '{token}' placeholder."
-        ),
-    )
-
-    def http_headers(self) -> dict[str, str]:
-        hdrs = dict(self.headers or {})
-        env_var = (self.api_key_env or "").strip()
-        if env_var and (token := os.getenv(env_var)):
-            target = (self.api_key_header or "").strip() or "Authorization"
-            if not any(h.lower() == target.lower() for h in hdrs):
-                try:
-                    value = (self.api_key_format or "{token}").format(token=token)
-                except Exception:
-                    value = token
-                hdrs[target] = value
-        return hdrs
-
-
-class MCPHttp(_MCPBase, _MCPHttpFields):
-    transport: Literal["http"]
-
-
-class MCPStreamableHttp(_MCPBase, _MCPHttpFields):
-    transport: Literal["streamable-http"]
-
-
-class MCPStdio(_MCPBase):
-    transport: Literal["stdio"]
-    command: str | list[str]
-    args: list[str] = Field(default_factory=list)
-    env: dict[str, str] = Field(
-        default_factory=dict,
-        description="Environment variables to set for the MCP server process.",
-    )
-
-    def argv(self) -> list[str]:
-        base = (
-            shlex.split(self.command)
-            if isinstance(self.command, str)
-            else list(self.command or [])
-        )
-        return [*base, *self.args] if self.args else base
-
-
-MCPServer = Annotated[
-    MCPHttp | MCPStreamableHttp | MCPStdio, Field(discriminator="transport")
-]
-
-
 class ModelConfig(BaseModel):
     name: str
     provider: str
@@ -298,24 +198,13 @@ class VibeConfig(BaseSettings):
     file_watcher_for_autocomplete: bool = False
     displayed_workdir: str = ""
     context_warnings: bool = False
-    auto_approve: bool = False
-    enable_telemetry: bool = True
+    auto_approve: bool = True
     system_prompt_id: str = "cli"
     include_commit_signature: bool = True
     include_model_info: bool = True
     include_project_context: bool = True
     include_prompt_detail: bool = True
-    enable_update_checks: bool = True
-    enable_auto_update: bool = True
-    enable_notifications: bool = True
     api_timeout: float = 720.0
-
-    # TODO(vibe-nuage): remove exclude=True once the feature is publicly available
-    nuage_enabled: bool = Field(default=False, exclude=True)
-    nuage_base_url: str = Field(default="https://api.globalaegis.net", exclude=True)
-    nuage_workflow_id: str = Field(default="__shared-nuage-workflow", exclude=True)
-    # TODO(vibe-nuage): change default value to MISTRAL_API_KEY once prod has shared vibe-nuage workers
-    nuage_api_key_env_var: str = Field(default="STAGING_MISTRAL_API_KEY", exclude=True)
 
     providers: list[ProviderConfig] = Field(
         default_factory=lambda: list(DEFAULT_PROVIDERS)
@@ -333,10 +222,6 @@ class VibeConfig(BaseSettings):
             "Directories are shallow-searched for tool definition files, "
             "while files are loaded directly if valid."
         ),
-    )
-
-    mcp_servers: list[MCPServer] = Field(
-        default_factory=list, description="Preferred MCP server configuration entries."
     )
 
     enabled_tools: list[str] = Field(
@@ -402,10 +287,6 @@ class VibeConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="VIBE_", case_sensitive=False, extra="ignore"
     )
-
-    @property
-    def nuage_api_key(self) -> str:
-        return os.getenv(self.nuage_api_key_env_var, "")
 
     @property
     def system_prompt(self) -> str:

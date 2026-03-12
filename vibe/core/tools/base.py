@@ -27,9 +27,7 @@ from vibe.core.types import ToolStreamEvent
 
 if TYPE_CHECKING:
     from vibe.core.agents.manager import AgentManager
-    from vibe.core.tools.mcp_sampling import MCPSamplingHandler
     from vibe.core.types import (
-        ApprovalCallback,
         EntrypointMetadata,
         SwitchAgentCallback,
         UserInputCallback,
@@ -43,13 +41,10 @@ class InvokeContext:
     """Context passed to tools during invocation."""
 
     tool_call_id: str
-    approval_callback: ApprovalCallback | None = field(default=None)
     agent_manager: AgentManager | None = field(default=None)
     user_input_callback: UserInputCallback | None = field(default=None)
-    sampling_callback: MCPSamplingHandler | None = field(default=None)
     session_dir: Path | None = field(default=None)
     entrypoint_metadata: EntrypointMetadata | None = field(default=None)
-    plan_file_path: Path | None = field(default=None)
     switch_agent_callback: SwitchAgentCallback | None = field(default=None)
 
 

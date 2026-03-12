@@ -62,16 +62,6 @@ class CommandRegistry:
                 description="Display agent statistics",
                 handler="_show_status",
             ),
-            "teleport": Command(
-                aliases=frozenset(["/teleport"]),
-                description="Teleport session to Vibe Nuage",
-                handler="_teleport_command",
-            ),
-            "proxy-setup": Command(
-                aliases=frozenset(["/proxy-setup"]),
-                description="Configure proxy and SSL certificate settings",
-                handler="_show_proxy_setup",
-            ),
             "resume": Command(
                 aliases=frozenset(["/resume", "/continue"]),
                 description="Browse and resume past sessions",
@@ -102,9 +92,7 @@ class CommandRegistry:
             "- `Ctrl+J` / `Shift+Enter` Insert newline",
             "- `Escape` Interrupt agent or close dialogs",
             "- `Ctrl+C` Quit (or clear input if text present)",
-            "- `Ctrl+G` Edit input in external editor",
             "- `Ctrl+O` Toggle tool output view",
-            "- `Shift+Tab` Toggle auto-approve mode",
             "",
             "### Special Features",
             "",
