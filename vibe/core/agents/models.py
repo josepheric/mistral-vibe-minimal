@@ -6,8 +6,6 @@ from pathlib import Path
 import tomllib
 from typing import TYPE_CHECKING, Any
 
-from vibe.core.paths import PLANS_DIR
-
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfig
 
@@ -36,9 +34,6 @@ class AgentType(StrEnum):
 
 class BuiltinAgentName(StrEnum):
     DEFAULT = "default"
-    CHAT = "chat"
-    PLAN = "plan"
-    ACCEPT_EDITS = "accept-edits"
     AUTO_APPROVE = "auto-approve"
     EXPLORE = "explore"
 
@@ -72,50 +67,12 @@ class AgentProfile:
         )
 
 
-CHAT_AGENT_TOOLS = ["grep", "read_file", "ask_user_question", "task"]
-
-
-def _plan_overrides() -> dict[str, Any]:
-    plans_pattern = str(PLANS_DIR.path / "*")
-    return {
-        "tools": {
-            "write_file": {"permission": "never", "allowlist": [plans_pattern]},
-            "search_replace": {"permission": "never", "allowlist": [plans_pattern]},
-        }
-    }
-
-
 DEFAULT = AgentProfile(
     BuiltinAgentName.DEFAULT,
     "Default",
-    "Requires approval for tool executions",
-    AgentSafety.NEUTRAL,
-)
-PLAN = AgentProfile(
-    BuiltinAgentName.PLAN,
-    "Plan",
-    "Read-only agent for exploration and planning",
-    AgentSafety.SAFE,
-    overrides=_plan_overrides(),
-)
-CHAT = AgentProfile(
-    BuiltinAgentName.CHAT,
-    "Chat",
-    "Read-only conversational mode for questions and discussions",
-    AgentSafety.SAFE,
-    overrides={"auto_approve": True, "enabled_tools": CHAT_AGENT_TOOLS},
-)
-ACCEPT_EDITS = AgentProfile(
-    BuiltinAgentName.ACCEPT_EDITS,
-    "Accept Edits",
-    "Auto-approves file edits only",
-    AgentSafety.DESTRUCTIVE,
-    overrides={
-        "tools": {
-            "write_file": {"permission": "always"},
-            "search_replace": {"permission": "always"},
-        }
-    },
+    "Auto-approves all tool executions",
+    AgentSafety.YOLO,
+    overrides={"auto_approve": True},
 )
 AUTO_APPROVE = AgentProfile(
     BuiltinAgentName.AUTO_APPROVE,
@@ -136,8 +93,6 @@ EXPLORE = AgentProfile(
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
     BuiltinAgentName.DEFAULT: DEFAULT,
-    BuiltinAgentName.PLAN: PLAN,
-    BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
     BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
     BuiltinAgentName.EXPLORE: EXPLORE,
 }

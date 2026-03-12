@@ -158,7 +158,6 @@ def run_cli(args: argparse.Namespace) -> None:
 
         stdin_prompt = get_prompt_from_stdin()
         if args.prompt is not None:
-            config.disabled_tools = [*config.disabled_tools, "ask_user_question"]
             programmatic_prompt = args.prompt or stdin_prompt
             if not programmatic_prompt:
                 print(
@@ -207,7 +206,6 @@ def run_cli(args: argparse.Namespace) -> None:
             run_textual_ui(
                 agent_loop=agent_loop,
                 initial_prompt=args.initial_prompt or stdin_prompt,
-                teleport_on_start=args.teleport,
             )
 
     except (KeyboardInterrupt, EOFError):

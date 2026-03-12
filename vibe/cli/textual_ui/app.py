@@ -7,7 +7,7 @@ from pathlib import Path
 import signal
 import subprocess
 import time
-from typing import Any, ClassVar, assert_never, cast
+from typing import Any, ClassVar, assert_never
 from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel
@@ -23,23 +23,8 @@ from textual.widgets import Static
 from vibe import __version__ as CORE_VERSION
 from vibe.cli.clipboard import copy_selection_to_clipboard
 from vibe.cli.commands import CommandRegistry
-from vibe.cli.plan_offer.adapters.http_whoami_gateway import HttpWhoAmIGateway
-from vibe.cli.plan_offer.decide_plan_offer import (
-    PlanInfo,
-    decide_plan_offer,
-    plan_offer_cta,
-    plan_title,
-    resolve_api_key_for_plan,
-)
-from vibe.cli.plan_offer.ports.whoami_gateway import WhoAmIGateway, WhoAmIPlanType
 from vibe.cli.terminal_setup import setup_terminal
 from vibe.cli.textual_ui.handlers.event_handler import EventHandler
-from vibe.cli.textual_ui.notifications import (
-    NotificationContext,
-    NotificationPort,
-    TextualNotificationAdapter,
-)
-from vibe.cli.textual_ui.widgets.approval_app import ApprovalApp
 from vibe.cli.textual_ui.widgets.banner.banner import Banner
 from vibe.cli.textual_ui.widgets.chat_input import ChatInputContainer
 from vibe.cli.textual_ui.widgets.compact import CompactMessage
@@ -55,14 +40,10 @@ from vibe.cli.textual_ui.widgets.messages import (
     UserCommandMessage,
     UserMessage,
     WarningMessage,
-    WhatsNewMessage,
 )
 from vibe.cli.textual_ui.widgets.no_markup_static import NoMarkupStatic
 from vibe.cli.textual_ui.widgets.path_display import PathDisplay
-from vibe.cli.textual_ui.widgets.proxy_setup_app import ProxySetupApp
-from vibe.cli.textual_ui.widgets.question_app import QuestionApp
 from vibe.cli.textual_ui.widgets.session_picker import SessionPickerApp
-from vibe.cli.textual_ui.widgets.teleport_message import TeleportMessage
 from vibe.cli.textual_ui.widgets.tools import ToolResultMessage
 from vibe.cli.textual_ui.windowing import (
     HISTORY_RESUME_TAIL_MESSAGES,
@@ -75,46 +56,15 @@ from vibe.cli.textual_ui.windowing import (
     should_resume_history,
     sync_backfill_state,
 )
-from vibe.cli.update_notifier import (
-    FileSystemUpdateCacheRepository,
-    PyPIUpdateGateway,
-    UpdateCacheRepository,
-    UpdateError,
-    UpdateGateway,
-    get_update_if_available,
-    load_whats_new_content,
-    mark_version_as_seen,
-    should_show_whats_new,
-)
-from vibe.cli.update_notifier.update import do_update
-from vibe.core.agent_loop import AgentLoop, TeleportError
+from vibe.core.agent_loop import AgentLoop
 from vibe.core.agents import AgentProfile
 from vibe.core.autocompletion.path_prompt_adapter import render_path_prompt
-from vibe.core.config import Backend, VibeConfig
+from vibe.core.config import VibeConfig
 from vibe.core.logger import logger
 from vibe.core.paths import HISTORY_FILE
 from vibe.core.session.session_loader import SessionLoader
-from vibe.core.teleport.types import (
-    TeleportAuthCompleteEvent,
-    TeleportAuthRequiredEvent,
-    TeleportCheckingGitEvent,
-    TeleportCompleteEvent,
-    TeleportPushingEvent,
-    TeleportPushRequiredEvent,
-    TeleportPushResponseEvent,
-    TeleportSendingGithubTokenEvent,
-    TeleportStartingWorkflowEvent,
-)
-from vibe.core.tools.base import ToolPermission
-from vibe.core.tools.builtins.ask_user_question import (
-    AskUserQuestionArgs,
-    AskUserQuestionResult,
-    Choice,
-    Question,
-)
 from vibe.core.types import (
     AgentStats,
-    ApprovalResponse,
     LLMMessage,
     RateLimitError,
     Role,
@@ -130,15 +80,12 @@ class BottomApp(StrEnum):
     """Bottom panel app types.
 
     Convention: Each value must match the widget class name with "App" suffix removed.
-    E.g., ApprovalApp -> Approval, ConfigApp -> Config, QuestionApp -> Question.
+    E.g., ConfigApp -> Config.
     This allows dynamic lookup via: BottomApp[type(widget).__name__.removesuffix("App")]
     """
 
-    Approval = auto()
     Config = auto()
     Input = auto()
-    ProxySetup = auto()
-    Question = auto()
     SessionPicker = auto()
 
 
@@ -216,35 +163,20 @@ class VibeApp(App):  # noqa: PLR0904
         self,
         agent_loop: AgentLoop,
         initial_prompt: str | None = None,
-        teleport_on_start: bool = False,
-        update_notifier: UpdateGateway | None = None,
-        update_cache_repository: UpdateCacheRepository | None = None,
         current_version: str = CORE_VERSION,
-        plan_offer_gateway: WhoAmIGateway | None = None,
-        terminal_notifier: NotificationPort | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self.agent_loop = agent_loop
-        self._terminal_notifier = terminal_notifier or TextualNotificationAdapter(
-            self,
-            get_enabled=lambda: self.config.enable_notifications,
-            default_title="Vibe",
-        )
         self._agent_running = False
         self._interrupt_requested = False
         self._agent_task: asyncio.Task | None = None
 
         self._loading_widget: LoadingWidget | None = None
-        self._pending_approval: asyncio.Future | None = None
-        self._pending_question: asyncio.Future | None = None
 
         self.event_handler: EventHandler | None = None
 
-        excluded_commands = []
-        if not self.config.nuage_enabled:
-            excluded_commands.append("teleport")
-        self.commands = CommandRegistry(excluded_commands=excluded_commands)
+        self.commands = CommandRegistry(excluded_commands=["teleport"])
 
         self._chat_input_container: ChatInputContainer | None = None
         self._current_bottom_app: BottomApp = BottomApp.Input
@@ -258,20 +190,14 @@ class VibeApp(App):  # noqa: PLR0904
         self._history_widget_indices: WeakKeyDictionary[Widget, int] = (
             WeakKeyDictionary()
         )
-        self._update_notifier = update_notifier
-        self._update_cache_repository = update_cache_repository
         self._current_version = current_version
-        self._plan_offer_gateway = plan_offer_gateway
         self._initial_prompt = initial_prompt
-        self._teleport_on_start = teleport_on_start and self.config.nuage_enabled
         self._last_escape_time: float | None = None
         self._banner: Banner | None = None
-        self._whats_new_message: WhatsNewMessage | None = None
         self._cached_messages_area: Widget | None = None
         self._cached_chat: ChatScroll | None = None
         self._cached_loading_area: Widget | None = None
         self._switch_agent_generation = 0
-        self._plan_info: PlanInfo | None = None
 
     @property
     def config(self) -> VibeConfig:
@@ -305,7 +231,6 @@ class VibeApp(App):  # noqa: PLR0904
 
     async def on_mount(self) -> None:
         self.theme = "textual-ansi"
-        self._terminal_notifier.restore()
 
         self._cached_messages_area = self.query_one("#messages")
         self._cached_chat = self.query_one("#chat", ChatScroll)
@@ -328,30 +253,21 @@ class VibeApp(App):  # noqa: PLR0904
         self.agent_loop.stats.add_listener("context_tokens", update_context_progress)
         self.agent_loop.stats.trigger_listeners()
 
-        self.agent_loop.set_approval_callback(self._approval_callback)
-        self.agent_loop.set_user_input_callback(self._user_input_callback)
         self._refresh_profile_widgets()
 
         chat_input_container = self.query_one(ChatInputContainer)
         chat_input_container.focus_input()
-        await self._resolve_plan()
         await self._show_dangerous_directory_warning()
         await self._resume_history_from_messages()
-        await self._check_and_show_whats_new()
-        self._schedule_update_notification()
         self.agent_loop.emit_new_session_telemetry()
 
         self.call_after_refresh(self._refresh_banner)
 
-        if self._initial_prompt or self._teleport_on_start:
+        if self._initial_prompt:
             self.call_after_refresh(self._process_initial_prompt)
 
     def _process_initial_prompt(self) -> None:
-        if self._teleport_on_start:
-            self.run_worker(
-                self._handle_teleport_command(self._initial_prompt), exclusive=False
-            )
-        elif self._initial_prompt:
+        if self._initial_prompt:
             self.run_worker(
                 self._handle_user_message(self._initial_prompt), exclusive=False
             )
@@ -364,10 +280,6 @@ class VibeApp(App):  # noqa: PLR0904
     ) -> None:
         if self._banner:
             self._banner.freeze_animation()
-
-        if self._whats_new_message:
-            await self._whats_new_message.remove()
-            self._whats_new_message = None
 
         value = event.value.strip()
         if not value:
@@ -383,11 +295,6 @@ class VibeApp(App):  # noqa: PLR0904
             await self._handle_bash_command(value[1:])
             return
 
-        if value.startswith("&"):
-            if self.config.nuage_enabled:
-                await self._handle_teleport_command(value[1:])
-                return
-
         if await self._handle_command(value):
             return
 
@@ -395,91 +302,6 @@ class VibeApp(App):  # noqa: PLR0904
             return
 
         await self._handle_user_message(value)
-
-    async def on_approval_app_approval_granted(
-        self, message: ApprovalApp.ApprovalGranted
-    ) -> None:
-        if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
-
-        await self._switch_to_input_app()
-
-    async def on_approval_app_approval_granted_always_tool(
-        self, message: ApprovalApp.ApprovalGrantedAlwaysTool
-    ) -> None:
-        self._set_tool_permission_always(
-            message.tool_name, save_permanently=message.save_permanently
-        )
-
-        if self._pending_approval and not self._pending_approval.done():
-            self._pending_approval.set_result((ApprovalResponse.YES, None))
-
-        await self._switch_to_input_app()
-
-    async def on_approval_app_approval_rejected(
-        self, message: ApprovalApp.ApprovalRejected
-    ) -> None:
-        if self._pending_approval and not self._pending_approval.done():
-            feedback = str(
-                get_user_cancellation_message(CancellationReason.OPERATION_CANCELLED)
-            )
-            self._pending_approval.set_result((ApprovalResponse.NO, feedback))
-
-        await self._switch_to_input_app()
-
-        if self._loading_widget and self._loading_widget.parent:
-            await self._remove_loading_widget()
-
-    async def on_question_app_answered(self, message: QuestionApp.Answered) -> None:
-        if self._pending_question and not self._pending_question.done():
-            result = AskUserQuestionResult(answers=message.answers, cancelled=False)
-            self._pending_question.set_result(result)
-
-        await self._switch_to_input_app()
-
-    async def on_question_app_cancelled(self, message: QuestionApp.Cancelled) -> None:
-        if self._pending_question and not self._pending_question.done():
-            result = AskUserQuestionResult(answers=[], cancelled=True)
-            self._pending_question.set_result(result)
-
-        await self._switch_to_input_app()
-        await self._interrupt_agent_loop()
-
-    async def _remove_loading_widget(self) -> None:
-        if self._loading_widget and self._loading_widget.parent:
-            await self._loading_widget.remove()
-            self._loading_widget = None
-
-    async def on_config_app_config_closed(
-        self, message: ConfigApp.ConfigClosed
-    ) -> None:
-        if message.changes:
-            VibeConfig.save_updates(message.changes)
-            await self._reload_config()
-        else:
-            await self._mount_and_scroll(
-                UserCommandMessage("Configuration closed (no changes saved).")
-            )
-
-        await self._switch_to_input_app()
-
-    async def on_proxy_setup_app_proxy_setup_closed(
-        self, message: ProxySetupApp.ProxySetupClosed
-    ) -> None:
-        if message.error:
-            await self._mount_and_scroll(
-                ErrorMessage(f"Failed to save proxy settings: {message.error}")
-            )
-        elif message.saved:
-            await self._mount_and_scroll(
-                UserCommandMessage(
-                    "Proxy settings saved. Restart the CLI for changes to take effect."
-                )
-            )
-        else:
-            await self._mount_and_scroll(UserCommandMessage("Proxy setup cancelled."))
-
-        await self._switch_to_input_app()
 
     async def on_compact_message_completed(
         self, message: CompactMessage.Completed
@@ -498,13 +320,6 @@ class VibeApp(App):  # noqa: PLR0904
         with self.batch_update():
             for widget in children[:compact_index]:
                 await widget.remove()
-
-    def _set_tool_permission_always(
-        self, tool_name: str, save_permanently: bool = False
-    ) -> None:
-        self.agent_loop.set_tool_permission(
-            tool_name, ToolPermission.ALWAYS, save_permanently
-        )
 
     async def _handle_command(self, user_input: str) -> bool:
         if command := self.commands.find_command(user_input):
@@ -663,39 +478,6 @@ class VibeApp(App):  # noqa: PLR0904
                 return
             await messages_area.mount_all(widgets)
 
-    def _is_tool_enabled_in_main_agent(self, tool: str) -> bool:
-        return tool in self.agent_loop.tool_manager.available_tools
-
-    async def _approval_callback(
-        self, tool: str, args: BaseModel, tool_call_id: str
-    ) -> tuple[ApprovalResponse, str | None]:
-        # Auto-approve only if parent is in auto-approve mode AND tool is enabled
-        # This ensures subagents respect the main agent's tool restrictions
-        if self.agent_loop and self.agent_loop.config.auto_approve:
-            if self._is_tool_enabled_in_main_agent(tool):
-                return (ApprovalResponse.YES, None)
-
-        self._pending_approval = asyncio.Future()
-        self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
-        with paused_timer(self._loading_widget):
-            await self._switch_to_approval_app(tool, args)
-            result = await self._pending_approval
-
-        self._pending_approval = None
-        return result
-
-    async def _user_input_callback(self, args: BaseModel) -> BaseModel:
-        question_args = cast(AskUserQuestionArgs, args)
-
-        self._pending_question = asyncio.Future()
-        self._terminal_notifier.notify(NotificationContext.ACTION_REQUIRED)
-        with paused_timer(self._loading_widget):
-            await self._switch_to_question_app(question_args)
-            result = await self._pending_question
-
-        self._pending_question = None
-        return result
-
     async def _handle_agent_loop_turn(self, prompt: str) -> None:
         self._agent_running = True
 
@@ -731,7 +513,7 @@ class VibeApp(App):  # noqa: PLR0904
 
             message = str(e)
             if isinstance(e, RateLimitError):
-                message = self._rate_limit_message()
+                message = "Rate limits exceeded. Please wait a moment before trying again."
 
             await self._mount_and_scroll(
                 ErrorMessage(message, collapsed=self._tools_collapsed)
@@ -746,108 +528,11 @@ class VibeApp(App):  # noqa: PLR0904
             if self.event_handler:
                 await self.event_handler.finalize_streaming()
             await self._refresh_windowing_from_history()
-            self._terminal_notifier.notify(NotificationContext.COMPLETE)
 
-    def _rate_limit_message(self) -> str:
-        upgrade_to_pro = self._plan_info and self._plan_info.plan_type in {
-            WhoAmIPlanType.API,
-            WhoAmIPlanType.UNAUTHORIZED,
-        }
-        if upgrade_to_pro:
-            return "Rate limits exceeded. Please wait a moment before trying again, or upgrade to Pro for higher rate limits and uninterrupted access."
-        return "Rate limits exceeded. Please wait a moment before trying again."
-
-    async def _teleport_command(self) -> None:
-        await self._handle_teleport_command(show_message=False)
-
-    async def _handle_teleport_command(
-        self, value: str | None = None, show_message: bool = True
-    ) -> None:
-        has_history = any(msg.role != Role.system for msg in self.agent_loop.messages)
-        if not value:
-            if show_message:
-                await self._mount_and_scroll(UserMessage("/teleport"))
-            if not has_history:
-                await self._mount_and_scroll(
-                    ErrorMessage(
-                        "No conversation history to teleport.",
-                        collapsed=self._tools_collapsed,
-                    )
-                )
-                return
-        elif show_message:
-            await self._mount_and_scroll(UserMessage(value))
-        self.run_worker(self._teleport(value), exclusive=False)
-
-    async def _teleport(self, prompt: str | None = None) -> None:
-        loading_area = self._cached_loading_area or self.query_one(
-            "#loading-area-content"
-        )
-        loading = LoadingWidget()
-        await loading_area.mount(loading)
-
-        teleport_msg = TeleportMessage()
-        await self._mount_and_scroll(teleport_msg)
-
-        try:
-            gen = self.agent_loop.teleport_to_vibe_nuage(prompt)
-            async for event in gen:
-                match event:
-                    case TeleportCheckingGitEvent():
-                        teleport_msg.set_status("Checking git status...")
-                    case TeleportPushRequiredEvent(unpushed_count=count):
-                        await loading.remove()
-                        response = await self._ask_push_approval(count)
-                        await loading_area.mount(loading)
-                        teleport_msg.set_status("Teleporting...")
-                        await gen.asend(response)
-                    case TeleportPushingEvent():
-                        teleport_msg.set_status("Pushing to remote...")
-                    case TeleportAuthRequiredEvent(
-                        user_code=code, verification_uri=uri
-                    ):
-                        teleport_msg.set_status(
-                            f"GitHub auth required. Code: {code} (copied)\nOpen: {uri}"
-                        )
-                    case TeleportAuthCompleteEvent():
-                        teleport_msg.set_status("GitHub authenticated.")
-                    case TeleportStartingWorkflowEvent():
-                        teleport_msg.set_status("Starting Nuage workflow...")
-                    case TeleportSendingGithubTokenEvent():
-                        teleport_msg.set_status("Sending encrypted GitHub token...")
-                    case TeleportCompleteEvent(url=url):
-                        teleport_msg.set_complete(url)
-        except TeleportError as e:
-            await teleport_msg.remove()
-            await self._mount_and_scroll(
-                ErrorMessage(str(e), collapsed=self._tools_collapsed)
-            )
-        finally:
-            if loading.parent:
-                await loading.remove()
-
-    async def _ask_push_approval(self, count: int) -> TeleportPushResponseEvent:
-        word = f"commit{'s' if count != 1 else ''}"
-        push_label = "Push and continue"
-        result = await self._user_input_callback(
-            AskUserQuestionArgs(
-                questions=[
-                    Question(
-                        question=f"You have {count} unpushed {word}. Push to continue?",
-                        header="Push",
-                        options=[Choice(label=push_label), Choice(label="Cancel")],
-                        hide_other=True,
-                    )
-                ]
-            )
-        )
-        ok = (
-            isinstance(result, AskUserQuestionResult)
-            and not result.cancelled
-            and bool(result.answers)
-            and result.answers[0].answer == push_label
-        )
-        return TeleportPushResponseEvent(approved=ok)
+    async def _remove_loading_widget(self) -> None:
+        if self._loading_widget and self._loading_widget.parent:
+            await self._loading_widget.remove()
+            self._loading_widget = None
 
     async def _interrupt_agent_loop(self) -> None:
         if not self._agent_running or self._interrupt_requested:
@@ -900,11 +585,6 @@ class VibeApp(App):  # noqa: PLR0904
         if self._current_bottom_app == BottomApp.Config:
             return
         await self._switch_to_config_app()
-
-    async def _show_proxy_setup(self) -> None:
-        if self._current_bottom_app == BottomApp.ProxySetup:
-            return
-        await self._switch_to_proxy_setup_app()
 
     async def _show_session_picker(self) -> None:
         session_config = self.config.session_logging
@@ -1012,13 +692,12 @@ class VibeApp(App):  # noqa: PLR0904
             base_config = VibeConfig.load()
 
             await self.agent_loop.reload_with_initial_messages(base_config=base_config)
-            await self._resolve_plan()
 
             if self._banner:
                 self._banner.set_state(
                     base_config,
                     self.agent_loop.skill_manager,
-                    plan_title(self._plan_info),
+                    None,
                 )
             await self._mount_and_scroll(UserCommandMessage("Configuration reloaded."))
         except Exception as e:
@@ -1182,24 +861,6 @@ class VibeApp(App):  # noqa: PLR0904
         await self._mount_and_scroll(UserCommandMessage("Configuration opened..."))
         await self._switch_from_input(ConfigApp(self.config))
 
-    async def _switch_to_proxy_setup_app(self) -> None:
-        if self._current_bottom_app == BottomApp.ProxySetup:
-            return
-
-        await self._mount_and_scroll(UserCommandMessage("Proxy setup opened..."))
-        await self._switch_from_input(ProxySetupApp())
-
-    async def _switch_to_approval_app(
-        self, tool_name: str, tool_args: BaseModel
-    ) -> None:
-        approval_app = ApprovalApp(
-            tool_name=tool_name, tool_args=tool_args, config=self.config
-        )
-        await self._switch_from_input(approval_app, scroll=True)
-
-    async def _switch_to_question_app(self, args: AskUserQuestionArgs) -> None:
-        await self._switch_from_input(QuestionApp(args=args), scroll=True)
-
     async def _switch_to_input_app(self) -> None:
         for app in BottomApp:
             if app != BottomApp.Input:
@@ -1225,12 +886,6 @@ class VibeApp(App):  # noqa: PLR0904
                     self.query_one(ChatInputContainer).focus_input()
                 case BottomApp.Config:
                     self.query_one(ConfigApp).focus()
-                case BottomApp.ProxySetup:
-                    self.query_one(ProxySetupApp).focus()
-                case BottomApp.Approval:
-                    self.query_one(ApprovalApp).focus()
-                case BottomApp.Question:
-                    self.query_one(QuestionApp).focus()
                 case BottomApp.SessionPicker:
                     self.query_one(SessionPickerApp).focus()
                 case app:
@@ -1244,24 +899,6 @@ class VibeApp(App):  # noqa: PLR0904
             config_app.action_close()
         except Exception:
             pass
-        self._last_escape_time = None
-
-    def _handle_approval_app_escape(self) -> None:
-        try:
-            approval_app = self.query_one(ApprovalApp)
-            approval_app.action_reject()
-        except Exception:
-            pass
-        self.agent_loop.telemetry_client.send_user_cancelled_action("reject_approval")
-        self._last_escape_time = None
-
-    def _handle_question_app_escape(self) -> None:
-        try:
-            question_app = self.query_one(QuestionApp)
-            question_app.action_cancel()
-        except Exception:
-            pass
-        self.agent_loop.telemetry_client.send_user_cancelled_action("cancel_question")
         self._last_escape_time = None
 
     def _handle_session_picker_app_escape(self) -> None:
@@ -1289,23 +926,6 @@ class VibeApp(App):  # noqa: PLR0904
 
         if self._current_bottom_app == BottomApp.Config:
             self._handle_config_app_escape()
-            return
-
-        if self._current_bottom_app == BottomApp.ProxySetup:
-            try:
-                proxy_setup_app = self.query_one(ProxySetupApp)
-                proxy_setup_app.action_close()
-            except Exception:
-                pass
-            self._last_escape_time = None
-            return
-
-        if self._current_bottom_app == BottomApp.Approval:
-            self._handle_approval_app_escape()
-            return
-
-        if self._current_bottom_app == BottomApp.Question:
-            self._handle_question_app_escape()
             return
 
         if self._current_bottom_app == BottomApp.SessionPicker:
@@ -1387,7 +1007,7 @@ class VibeApp(App):  # noqa: PLR0904
     def _refresh_banner(self) -> None:
         if self._banner:
             self._banner.set_state(
-                self.config, self.agent_loop.skill_manager, plan_title(self._plan_info)
+                self.config, self.agent_loop.skill_manager, None
             )
 
     def _update_profile_widgets(self, profile: AgentProfile) -> None:
@@ -1410,8 +1030,6 @@ class VibeApp(App):  # noqa: PLR0904
             def switch_agent_sync() -> None:
                 try:
                     asyncio.run(self.agent_loop.switch_agent(new_profile.name))
-                    self.agent_loop.set_approval_callback(self._approval_callback)
-                    self.agent_loop.set_user_input_callback(self._user_input_callback)
                 finally:
                     if (
                         self._chat_input_container
@@ -1465,53 +1083,6 @@ class VibeApp(App):  # noqa: PLR0904
             )
             await self._mount_and_scroll(WarningMessage(warning, show_border=False))
 
-    async def _check_and_show_whats_new(self) -> None:
-        if self._update_cache_repository is None:
-            return
-
-        if not await should_show_whats_new(
-            self._current_version, self._update_cache_repository
-        ):
-            return
-
-        content = load_whats_new_content()
-        if content is not None:
-            whats_new_message = WhatsNewMessage(content)
-            plan_offer = plan_offer_cta(self._plan_info)
-            if plan_offer is not None:
-                whats_new_message = WhatsNewMessage(f"{content}\n\n{plan_offer}")
-            if self._history_widget_indices:
-                whats_new_message.add_class("after-history")
-            messages_area = self._cached_messages_area or self.query_one("#messages")
-            chat = self._cached_chat or self.query_one("#chat", ChatScroll)
-            should_anchor = chat.is_at_bottom
-            await chat.mount(whats_new_message, after=messages_area)
-            self._whats_new_message = whats_new_message
-            if should_anchor:
-                chat.anchor()
-        await mark_version_as_seen(self._current_version, self._update_cache_repository)
-
-    async def _resolve_plan(self) -> None:
-        if self._plan_offer_gateway is None:
-            self._plan_info = None
-            return
-
-        try:
-            active_model = self.config.get_active_model()
-            provider = self.config.get_provider_for_model(active_model)
-
-            if provider.backend != Backend.MISTRAL:
-                self._plan_info = None
-                return
-
-            api_key = resolve_api_key_for_plan(provider)
-            self._plan_info = await decide_plan_offer(api_key, self._plan_offer_gateway)
-        except Exception as exc:
-            logger.warning(
-                "Plan-offer check failed (%s).", type(exc).__name__, exc_info=True
-            )
-            return
-
     async def _mount_and_scroll(
         self, widget: Widget, after: Widget | None = None
     ) -> None:
@@ -1559,56 +1130,6 @@ class VibeApp(App):  # noqa: PLR0904
             messages_area, visible=has_backfill, remaining=self._windowing.remaining
         )
 
-    def _schedule_update_notification(self) -> None:
-        if self._update_notifier is None or not self.config.enable_update_checks:
-            return
-
-        asyncio.create_task(self._check_update(), name="version-update-check")
-
-    async def _check_update(self) -> None:
-        try:
-            if self._update_notifier is None or self._update_cache_repository is None:
-                return
-
-            update_availability = await get_update_if_available(
-                update_notifier=self._update_notifier,
-                current_version=self._current_version,
-                update_cache_repository=self._update_cache_repository,
-            )
-        except UpdateError as error:
-            self.notify(
-                error.message,
-                title="Update check failed",
-                severity="warning",
-                timeout=10,
-            )
-            return
-        except Exception as exc:
-            logger.debug("Version update check failed", exc_info=exc)
-            return
-
-        if update_availability is None or not update_availability.should_notify:
-            return
-
-        update_message_prefix = (
-            f"{self._current_version} => {update_availability.latest_version}"
-        )
-
-        if self.config.enable_auto_update and await do_update():
-            self.notify(
-                f"{update_message_prefix}\nVibe was updated successfully. Please restart to use the new version.",
-                title="Update successful",
-                severity="information",
-                timeout=10,
-            )
-            return
-
-        message = f"{update_message_prefix}\nPlease update mistral-vibe with your package manager"
-
-        self.notify(
-            message, title="Update available", severity="information", timeout=10
-        )
-
     def action_copy_selection(self) -> None:
         copied_text = copy_selection_to_clipboard(self, show_toast=False)
         if copied_text is not None:
@@ -1621,12 +1142,10 @@ class VibeApp(App):  # noqa: PLR0904
                 self.agent_loop.telemetry_client.send_user_copied_text(copied_text)
 
     def on_app_blur(self, event: AppBlur) -> None:
-        self._terminal_notifier.on_blur()
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(False)
 
     def on_app_focus(self, event: AppFocus) -> None:
-        self._terminal_notifier.on_focus()
         if self._chat_input_container and self._chat_input_container.input_widget:
             self._chat_input_container.input_widget.set_app_focus(True)
 
@@ -1657,18 +1176,10 @@ def _print_session_resume_message(session_id: str | None) -> None:
 def run_textual_ui(
     agent_loop: AgentLoop,
     initial_prompt: str | None = None,
-    teleport_on_start: bool = False,
 ) -> None:
-    update_notifier = PyPIUpdateGateway(project_name="mistral-vibe")
-    update_cache_repository = FileSystemUpdateCacheRepository()
-    plan_offer_gateway = HttpWhoAmIGateway()
     app = VibeApp(
         agent_loop=agent_loop,
         initial_prompt=initial_prompt,
-        teleport_on_start=teleport_on_start,
-        update_notifier=update_notifier,
-        update_cache_repository=update_cache_repository,
-        plan_offer_gateway=plan_offer_gateway,
     )
     session_id = app.run()
     _print_session_resume_message(session_id)
